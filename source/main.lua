@@ -16,13 +16,14 @@ local FEATURE_INITIALS <const> = false
 
 -- Fonts
 local _sysFont       = gfx.getSystemFont()
-local fontSmall      = _sysFont
-local fontRegular    = _sysFont
-local fontBold       = gfx.getSystemFont(gfx.font.kVariantBold) or _sysFont
-local fontMedium     = _sysFont
-local fontTitle      = gfx.font.new("fonts/Rubik-ExtraBold-64")
+local _sysBold       = gfx.getSystemFont(gfx.font.kVariantBold) or _sysFont
+local fontSmall      = _sysBold
+local fontRegular    = _sysBold
+local fontBold       = _sysBold
+local fontMedium     = _sysBold
+local fontTitle      = gfx.font.new("fonts/Rubik-Bold-48")
 local fontPauseTitle = gfx.font.new("fonts/Rubik-Bold-24")
-local fontPauseItem  = _sysFont
+local fontPauseItem  = _sysBold
 
 --------------------------------------------------------------
 -- CONSTANTS
@@ -111,6 +112,10 @@ local function loadGame()
     return data
 end
 
+-- Forward declaration: getActiveTimeSecs is defined later (line ~189) but
+-- saveGame needs to close over it as an upvalue, not resolve as a global.
+local getActiveTimeSecs
+
 local function saveGame(engine)
     local data = engine.state:toTable()
     data.elapsedSecs = getActiveTimeSecs()   -- persist elapsed play time for efficiency
@@ -186,7 +191,7 @@ local function tickTimers()
     end
 end
 
-local function getActiveTimeSecs()
+getActiveTimeSecs = function()
     if isTimerPaused then
         return sessionActiveTime
     else
@@ -518,6 +523,23 @@ local function drawButtonIcon(letter, cx, cy)
     gfx.setColor(gfx.kColorBlack)
     gfx.drawText(glyph, cx - math.floor(gw / 2), cy - math.floor(gh / 2))
     gfx.setFont(prev)
+end
+
+--- Draw the crank icon (hub + arm + handle) centered at (cx, cy).
+--- angle: radians, defaults to 45° static pose. Pass live crank angle to animate.
+local function drawCrankIcon(cx, cy, angle)
+    angle = angle or math.rad(45)
+    local armLen = 9
+    local hx = cx + math.cos(angle) * armLen
+    local hy = cy + math.sin(angle) * armLen
+    gfx.setLineWidth(1)
+    gfx.setColor(gfx.kColorWhite)
+    gfx.fillCircleAtPoint(cx, cy, 5)
+    gfx.fillCircleAtPoint(hx, hy, 3)
+    gfx.setColor(gfx.kColorBlack)
+    gfx.drawCircleAtPoint(cx, cy, 5)
+    gfx.drawLine(cx, cy, hx, hy)
+    gfx.drawCircleAtPoint(hx, hy, 3)
 end
 
 --- Draw a row of button-icon+label segments centered at (cx, textTopY).
@@ -1124,7 +1146,7 @@ function playdate.update()
             local splashTitleText = "NEUTRALIZE"
             gfx.setFont(fontTitle)
             local tw, th = gfx.getTextSize(splashTitleText)
-            local strokeW = 4
+            local strokeW = 5 -- Derived from math.floor(3 * (60/36))
             local buf = strokeW + 2
             splashTitleImage = gfx.image.new(tw + buf*2, th + buf*2)
             gfx.pushContext(splashTitleImage)
@@ -3033,7 +3055,7 @@ function playdate.update()
 
         -- Overlay box (rounded), scaled from center (200, 120)
         local bw = math.floor(240 * s)
-        local bh = math.floor(120 * s)
+        local bh = math.floor(130 * s)
         local bx = 200 - math.floor(bw / 2)
         local by = 120 - math.floor(bh / 2)
         local br = math.max(1, math.floor(8 * s))
@@ -3120,12 +3142,23 @@ function playdate.update()
 
         -- Prompt: show once box is fully in
         if s >= 1.0 then
-            drawButtonHints(200, 145,
-                { {button="A", label="continue"}, {label="Crank to celebrate"} },
-                fontSmall)
+            -- Stacked prompts: A / Crank / Tilt — each on its own line
+            local hintY1, hintY2, hintY3 = 128, 146, 164
+            local IGAP = 4
+            -- Row 1: [A] continue
+            drawButtonHints(200, hintY1, { {button="A", label="continue"} }, fontSmall)
+            -- Row 2: [crank icon] Crank to celebrate
             gfx.setFont(fontSmall)
+            local crankLabelW = gfx.getTextSize("Crank to celebrate")
+            local _, gh = getGlyphSize()
+            local iconR = 5
+            local crankRowW = iconR*2 + IGAP + crankLabelW
+            local crankRowX = 200 - math.floor(crankRowW / 2)
+            drawCrankIcon(crankRowX + iconR, hintY2 + math.floor(gh / 2), math.rad(playdate.getCrankPosition()))
             gfx.setColor(gfx.kColorBlack)
-            gfx.drawTextAligned("Tilt for joy", 200, 157, kTextAlignment.center)
+            gfx.drawText("Crank to celebrate", crankRowX + iconR*2 + IGAP, hintY2)
+            -- Row 3: Tilt for joy (plain, centered)
+            gfx.drawTextAligned("Tilt for joy", 200, hintY3, kTextAlignment.center)
         end
 
         if playdate.buttonJustPressed(playdate.kButtonA) and not AnimManager.isTransitioning() and s >= 1.0 then
