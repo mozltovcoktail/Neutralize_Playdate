@@ -20,7 +20,7 @@ local fontSmall      = _sysFont
 local fontRegular    = _sysFont
 local fontBold       = gfx.getSystemFont(gfx.font.kVariantBold) or _sysFont
 local fontMedium     = _sysFont
-local fontTitle      = gfx.font.new("fonts/Rubik-Medium-64")
+local fontTitle      = gfx.font.new("fonts/Rubik-ExtraBold-64")
 local fontPauseTitle = gfx.font.new("fonts/Rubik-Bold-24")
 local fontPauseItem  = _sysFont
 
