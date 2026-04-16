@@ -1,0 +1,1231 @@
+commit f9cbd0777e3d40b3238000e9cf51b22cb14de99a
+Author: Aaron Price <aaronmorrisprice@gmail.com>
+Date:   Tue Apr 14 15:09:33 2026 -0400
+
+    Fix win/game-over detection, add new-best label, shuffle reminder opt-out, dev panel updates
+    
+    Web: revert win condition to neutralCount >= 35 (matching Unity), remove
+    spawn guard and futility lookahead from canAnyMove(), add delayed pop for
+    cosmetic 36th tile, show "NEW BEST!" on game-over screen, add "Don't show
+    again" checkbox to shuffle reminder, restyle reminder popover, update dev
+    panel PIN, add Fill Board (33)/Reset Daily Plays/Reset Shuffle Reminder
+    debug buttons.
+    
+    Playdate: wire Catalog Scoreboards API with prefetch cache and fixed
+    (status,result) callbacks, update backlog, refactor main.lua, update
+    GameEngine win condition comment.
+    
+    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/Playdate_Port/source/main.lua b/Playdate_Port/source/main.lua
+index dedf358..8051118 100644
+--- a/Playdate_Port/source/main.lua
++++ b/Playdate_Port/source/main.lua
+@@ -6,7 +6,6 @@ import "SoundManager"
+ import "AnimManager"
+ import "Achievements"
+ import "VFXConfig"
+-import "Challenges"
+ import "Scoreboards"
+ 
+ local gfx <const> = playdate.graphics
+@@ -66,7 +65,6 @@ local SCENE_MENU             = "menu"
+ -- removed SCENE_ACHIEVEMENTS
+ 
+ local scene = SCENE_TITLE
+-local _debugLastScene = SCENE_TITLE
+ local menuStatsY = 240
+ local titleStatsY = 240
+ local crankRatchetAccum = 0   -- degrees accumulated for ratchet tick sound
+@@ -231,7 +229,10 @@ do
+     end
+ end
+ SoundManager.init()
+-Challenges.load()
++
++-- Pre-populate score cache so the drawer has data on first open
++Scoreboards.prefetch("efficiency")
++Scoreboards.prefetch("highest_score")
+ 
+ -- Apply saved audio mode on startup
+ local function applyAudioMode(mode)
+@@ -332,8 +333,9 @@ local DRAWER_PEEK_HOLD     = 45   -- frames to hold at peak
+ --------------------------------------------------------------
+ -- PAUSE MENU DEBUG SUBMENU
+ --------------------------------------------------------------
+-local menuDebugOpen    = false
+-local menuDebugSel     = 1
++local menuDebugOpen      = false
++local menuDebugSel       = 1
++local menuConfirmRestart = false
+ local DEBUG_OPTS = {
+     "Fill board",
+     "Force personal best",
+@@ -413,30 +415,6 @@ local function startNewGame()
+     SoundManager.playBGM()
+ end
+ 
+--- Challenge state (declared before startChallengeAttempt so it captures these as upvalues)
+-local dailyEngine = nil           -- separate engine for challenge play
+-local dailyStartTime = 0          -- epoch seconds when challenge attempt started
+-local dailyResult = nil           -- { value=number, isNewBest=bool, challengeType=table }
+-local dailyMoveCount = 0          -- moves taken this challenge attempt
+-local currentChallenge = nil       -- currently selected challenge type table
+-
+---------------------------------------------------------------
+--- START A DAILY CHALLENGE ATTEMPT
+---------------------------------------------------------------
+-local function startChallengeAttempt(challengeType)
+-    dailyEngine = GameEngine.new()
+-    dailyStartTime = playdate.getSecondsSinceEpoch()
+-    dailyMoveCount = 0
+-    dailyResult = nil
+-    crankAccumulator = 0
+-    shuffleAccumulator = 0
+-    AnimManager.clear()
+-    AnimManager.addTileIntro(GRID_SIZE)
+-    SoundManager.play("restart")
+-    scene = SCENE_CHALLENGE_PLAY
+-    SoundManager.playBGM()
+-end
+-
+ local titleImg = nil
+ 
+ -- Cached image for score-pop animation (avoids per-frame allocation)
+@@ -446,8 +424,6 @@ local scorePopImg = gfx.image.new(80, 20, gfx.kColorClear)
+ local reduceFlashing = false
+ local deviceFlipped  = false
+ 
+-local challengeSelectIndex = 1     -- 1-5 for challenge selection screen
+-
+ 
+ -- VFX state
+ local vfxFrame = 0                -- global frame counter for animations
+@@ -488,8 +464,6 @@ local function resumeOrNewGame()
+         SoundManager.playBGM()
+     else
+         startNewGame()
+-        stats.gamesPlayed = stats.gamesPlayed + 1
+-        saveStats()
+     end
+ end
+ 
+@@ -820,57 +794,23 @@ local function drawUnifiedDrawer()
+     local rpad = drawerX + drawerW - 18  -- leave room for scrollbar
+     local y    = drawerY + 10 - math.floor(drawerScrollPx)
+ 
+-    -- ── Leaderboards ─────────────────────────────────────────────
+-    local firstLeaderSection = true
+-    local function drawLeaderSection(title, boardID, formatFn)
++    -- ── Section divider helper ────────────────────────────────────
++    local firstSection = true
++    local function drawSectionHeader(title)
+         gfx.setColor(gfx.kColorBlack)
+         gfx.setLineWidth(1)
+-        if not firstLeaderSection then
++        if not firstSection then
+             gfx.drawLine(drawerX + 8, y, drawerX + drawerW - 8, y)
+             y = y + 6
+         end
+-        firstLeaderSection = false
++        firstSection = false
+         gfx.setFont(sysFont)
+         gfx.drawTextAligned("*" .. title .. "*", 200, y, kTextAlignment.center)
+         y = y + 16
+-
+-        local entries = Scoreboards.getTopScores(boardID, 5)
+-        if #entries == 0 then
+-            -- no entries yet, skip
+-        else
+-            for _, e in ipairs(entries) do
+-                local initials  = (e.playerName or "???"):upper()
+-                local valStr    = formatFn(e.value)
+-                local dateStr   = e.date or "—"
+-                local rankStr   = e.rank .. "."
+-                gfx.setFont(sysFont)
+-                gfx.drawText(rankStr .. " *" .. initials .. "*", pad + 4, y)
+-                gfx.drawTextAligned(dateStr, 200 + 30, y, kTextAlignment.right)
+-                gfx.drawTextAligned(valStr, rpad, y, kTextAlignment.right)
+-                y = y + 14
+-            end
+-        end
+-        y = y + 4
+     end
+ 
+-    -- FEATURE_INITIALS: initials row removed; restore block below to re-enable
+-    -- gfx.setFont(sysFont)
+-    -- gfx.drawText("INITIALS: *" .. Scoreboards.getLastInitials() .. "*", pad + 4, y)
+-    -- gfx.drawTextAligned("[edit → B]", rpad, y, kTextAlignment.right)
+-    -- y = y + 18
+-
+-    drawLeaderSection("Stats",  "efficiency",    function(v) return Scoreboards.formatEfficiency(v) end)
+-
+-    -- ── Stats card (outlined inset) ─────────────────────────────
+-    local cardX, cardW = drawerX + 8, drawerW - 16
+-    local cardY = y
+-    local sp = 16  -- row spacing
+-    local cardH = sp * 4 + 20  -- 4 stat rows + padding
+-
+-    gfx.setColor(gfx.kColorBlack)
+-    gfx.drawRoundRect(cardX, cardY, cardW, cardH, 4)
+-
+-    y = cardY + 10
++    -- ── Stats section ─────────────────────────────────────────────
++    drawSectionHeader("Stats")
+ 
+     -- Dot leader helper: draws "LABEL ····· VALUE" with dots filling the gap
+     local function drawStatRow(label, value, rowY)
+@@ -880,7 +820,6 @@ local function drawUnifiedDrawer()
+         local valueW = gfx.getTextSize(valStr)
+         gfx.drawText(label, pad + 4, rowY)
+         gfx.drawTextAligned(valStr, rpad - 8, rowY, kTextAlignment.right)
+-        -- Dot leaders
+         local dotStart = pad + 4 + labelW + 4
+         local dotEnd = rpad - 8 - valueW - 4
+         local dotX = dotStart
+@@ -890,26 +829,24 @@ local function drawUnifiedDrawer()
+         end
+     end
+ 
+-    drawStatRow("High Score", "" .. (stats.highScore or 0), y)
+-    y = y + sp
+-    drawStatRow("Best Level", "" .. (stats.highestLevel or 1), y)
+-    y = y + sp
+-    drawStatRow("Games Played", "" .. (stats.gamesPlayed or 0), y)
+-    y = y + sp
+-    drawStatRow("Efficiency", "" .. (stats.bestEfficiency or 0), y)
+-    y = cardY + cardH + 10
++    local cardX, cardW = drawerX + 8, drawerW - 16
++    local cardY = y
++    local sp = 16
++    local cardH = sp * 4 + 20
+ 
+-    -- ── Achievements header ─────────────────────────────────────
+     gfx.setColor(gfx.kColorBlack)
+-    gfx.setLineWidth(1)
+-    gfx.drawLine(drawerX + 8, y, drawerX + drawerW - 8, y)
+-    y = y + 6
++    gfx.drawRoundRect(cardX, cardY, cardW, cardH, 4)
++
++    y = cardY + 10
++    drawStatRow("High Score",   "" .. (stats.highScore or 0),      y); y = y + sp
++    drawStatRow("Best Level",   "" .. (stats.highestLevel or 1),   y); y = y + sp
++    drawStatRow("Games Played", "" .. (stats.gamesPlayed or 0),    y); y = y + sp
++    drawStatRow("Efficiency",   "" .. (stats.bestEfficiency or 0), y)
++    y = cardY + cardH + 10
++
++    -- ── Achievements section ──────────────────────────────────────
+     local unlocked = Achievements.getUnlockedCount()
+-    gfx.setFont(sysFont)
+-    gfx.drawTextAligned(
+-        "*Achievements*  " .. unlocked .. "/" .. Achievements.TOTAL,
+-        200, y, kTextAlignment.center)
+-    y = y + 16
++    drawSectionHeader("Achievements  " .. unlocked .. "/" .. Achievements.TOTAL)
+ 
+     -- ── Achievement rows ─────────────────────────────────────────
+     local achCtx = {
+@@ -1001,6 +938,35 @@ local function drawUnifiedDrawer()
+         y = rowBottom + 2
+     end
+ 
++    -- ── Hall of Fame (Catalog only) ───────────────────────────────
++    if Scoreboards.isCatalogMode() then
++        -- Renders one board within the Hall of Fame section (no extra divider)
++        local function drawHofBoard(label, boardID, formatFn)
++            gfx.setFont(sysFont)
++            gfx.drawTextAligned(label, 200, y, kTextAlignment.center)
++            y = y + 14
++            local entries = Scoreboards.getTopScores(boardID, 5)
++            if #entries == 0 then
++                gfx.drawTextAligned("no scores yet", 200, y, kTextAlignment.center)
++                y = y + 14
++            else
++                for _, e in ipairs(entries) do
++                    local name    = e.playerName or "???"
++                    local valStr  = formatFn(e.value)
++                    local rankStr = e.rank .. "."
++                    gfx.drawText(rankStr .. " *" .. name .. "*", pad + 4, y)
++                    gfx.drawTextAligned(valStr, rpad, y, kTextAlignment.right)
++                    y = y + 14
++                end
++            end
++            y = y + 6
++        end
++
++        drawSectionHeader("Hall of Fame")
++        drawHofBoard("Efficiency",    "efficiency",    function(v) return Scoreboards.formatEfficiency(v) end)
++        drawHofBoard("Highest Score", "highest_score", function(v) return tostring(v) end)
++    end
++
+     -- ── Scrollbar ────────────────────────────────────────────────
+     -- totalH measured from actual rendered content (dynamic rows)
+     local contentTop = drawerY + 10 - math.floor(drawerScrollPx)
+@@ -1118,10 +1084,6 @@ function playdate.update()
+     reduceFlashing = playdate.getReduceFlashing()
+     deviceFlipped  = playdate.getFlipped()
+     vfxFrame = vfxFrame + 1
+-    if scene ~= _debugLastScene then
+-        print("[SCENE] " .. tostring(_debugLastScene) .. " → " .. tostring(scene))
+-        _debugLastScene = scene
+-    end
+ 
+     -- Update VFX: floating score labels
+     for i = #floatingScores, 1, -1 do
+@@ -1497,29 +1459,64 @@ function playdate.update()
+             gfx.setColor(gfx.kColorBlack)
+             gfx.drawRoundRect(182, 65, TILE_SIZE, TILE_SIZE, TILE_RADIUS)
+ 
+-            -- Lock / anchor visual: X marks showing blocked
+-            gfx.drawTextAligned("X", 170, 75, kTextAlignment.center)
+-            gfx.drawTextAligned("X", 228, 75, kTextAlignment.center)
+-            gfx.drawTextAligned("X", 195, 53, kTextAlignment.center)
+-            gfx.drawTextAligned("X", 195, 107, kTextAlignment.center)
++            -- Drawn X marks + directional arrows showing all 4 directions blocked
++            gfx.setColor(gfx.kColorBlack)
++            gfx.setLineWidth(2)
++            local function drawXMark(cx, cy)
++                local s = 5
++                gfx.drawLine(cx - s, cy - s, cx + s, cy + s)
++                gfx.drawLine(cx + s, cy - s, cx - s, cy + s)
++            end
++            local function drawArrowHead(cx, cy, dx, dy)
++                -- Small arrowhead pointing in direction (dx, dy); tip at (cx, cy)
++                local s = 6
++                local px, py = -dy, dx  -- perpendicular
++                gfx.drawLine(cx, cy, cx - dx * s + px * s, cy - dy * s + py * s)
++                gfx.drawLine(cx, cy, cx - dx * s - px * s, cy - dy * s - py * s)
++            end
++            local tcx, tcy = 200, 83  -- tile center
++            local gap = 20            -- distance from tile edge to mark center
++            -- Left
++            local lx = 182 - gap
++            drawXMark(lx, tcy)
++            drawArrowHead(lx + 6, tcy, 1, 0)
++            gfx.drawLine(lx - 14, tcy, lx - 5, tcy)
++            -- Right
++            local rx = 218 + gap
++            drawXMark(rx, tcy)
++            drawArrowHead(rx - 6, tcy, -1, 0)
++            gfx.drawLine(rx + 14, tcy, rx + 5, tcy)
++            -- Top
++            local ty = 65 - gap
++            drawXMark(tcx, ty)
++            drawArrowHead(tcx, ty + 6, 0, 1)
++            gfx.drawLine(tcx, ty - 14, tcx, ty - 5)
++            -- Bottom
++            local by = 101 + gap
++            drawXMark(tcx, by)
++            drawArrowHead(tcx, by - 6, 0, -1)
++            gfx.drawLine(tcx, by + 14, tcx, by + 5)
++            gfx.setLineWidth(2)
+ 
+-            gfx.drawTextAligned("*0* tiles are *locked*.", 200, 130, kTextAlignment.center)
+-            gfx.drawTextAligned("They never move.", 200, 150, kTextAlignment.center)
++            gfx.drawTextAligned("*0* tiles are *locked*.", 200, 138, kTextAlignment.center)
++            gfx.drawTextAligned("They never move.", 200, 158, kTextAlignment.center)
+ 
+         elseif tutorialPanel == 4 then
+-            -- Panel 4: Fill the board with 0 tiles to clear
+-            local startX = 120
+-            local startY = 55
+-            local mini = 30
+-            for i = 0, 4 do
+-                for j = 0, 2 do
+-                    drawTile(0, startX + i * (mini + 2), startY + j * (mini + 2))
++            -- Panel 4: Fill the board with 0 tiles to clear — full 6×6 grid
++            local mini = 20
++            local gap  = 2
++            local gridW = 6 * mini + 5 * gap   -- 130px
++            local startX = math.floor((400 - gridW) / 2)  -- 135, centered
++            local startY = 37
++            for i = 0, 5 do
++                for j = 0, 5 do
++                    drawTile(0, startX + i * (mini + gap), startY + j * (mini + gap))
+                     gfx.setColor(gfx.kColorBlack)
+-                    gfx.drawRoundRect(startX + i * (mini + 2), startY + j * (mini + 2), mini, mini, 3)
++                    gfx.drawRoundRect(startX + i * (mini + gap), startY + j * (mini + gap), mini, mini, 2)
+                 end
+             end
+-            gfx.drawTextAligned("*Fill the board* with *0* tiles", 200, 155, kTextAlignment.center)
+-            gfx.drawTextAligned("to clear each level.", 200, 175, kTextAlignment.center)
++            gfx.drawTextAligned("*Fill the board* with *0* tiles", 200, 175, kTextAlignment.center)
++            gfx.drawTextAligned("to clear each level.", 200, 195, kTextAlignment.center)
+ 
+         elseif tutorialPanel == 5 then
+             -- Panel 5: Crank to shuffle
+@@ -1734,9 +1731,10 @@ function playdate.update()
+             pauseSnapshot = playdate.graphics.getDisplayImage()  -- freeze the board
+             pauseFadeTimer = 0
+             scene = SCENE_MENU
+-            menuSelector   = 1
+-            menuDebugOpen  = false
+-            menuDebugSel   = 1
++            menuSelector        = 1
++            menuDebugOpen       = false
++            menuDebugSel        = 1
++            menuConfirmRestart  = false
+             menuStatsY = 240
+             menuJustOpened = true
+             drawerY = DRAWER_CLOSED_Y  -- drawer resets to peek position when pausing
+@@ -1767,10 +1765,20 @@ function playdate.update()
+                             if ok and v then chargeDisplayVal = v end
+                         end
+                         shuffleAccumulator = shuffleAccumulator + crankChange
++                        -- Ratchet tick: speeds up as the crank spins faster
++                        crankRatchetAccum = crankRatchetAccum + crankChange
++                        local tickInterval = math.max(8, 30 - crankChange * 1.5)
++                        if crankRatchetAccum >= tickInterval then
++                            crankRatchetAccum = crankRatchetAccum % tickInterval
++                            SoundManager.playCrankTick()
++                        end
+                     elseif crankChange < -3 then
+                         -- Reverse crank: snap back
+                         shuffleAccumulator = 0
+                         chargeFlipAccum    = 0
++                        crankRatchetAccum  = 0
++                    else
++                        crankRatchetAccum = 0
+                     end
+                     -- Near-zero / idle: hold position
+ 
+@@ -1861,6 +1869,9 @@ function playdate.update()
+                 if pendingTimeSecs > 0 then
+                     Scoreboards.submitEfficiency(pendingScore, pendingTimeSecs)
+                     Scoreboards.submitHighestScore(pendingScore)
++                    -- Refresh cache so drawer shows updated scores after this game
++                    Scoreboards.prefetch("efficiency")
++                    Scoreboards.prefetch("highest_score")
+                 end
+                 -- FEATURE_INITIALS: replace direct submit above with initials prompt:
+                 -- loadLastInitials(); initialsCursor=1; initialsBlink=0
+@@ -2346,6 +2357,18 @@ function playdate.update()
+     if scene == SCENE_MENU then
+         local crankChange = playdate.getCrankChange()
+ 
++        -- Ratchet tick for drawer scrolling in pause menu
++        if math.abs(crankChange) > 0.5 then
++            crankRatchetAccum = crankRatchetAccum + math.abs(crankChange)
++            local tickInterval = math.max(8, 30 - math.abs(crankChange) * 1.5)
++            if crankRatchetAccum >= tickInterval then
++                crankRatchetAccum = crankRatchetAccum % tickInterval
++                SoundManager.playCrankTick()
++            end
++        else
++            crankRatchetAccum = 0
++        end
++
+         gfx.setImageDrawMode(gfx.kDrawModeCopy)
+         gfx.clearClipRect()
+ 
+@@ -2527,8 +2550,42 @@ function playdate.update()
+         -- Drawer drawn on top of the veil
+         drawUnifiedDrawer()
+ 
++        -- Restart confirmation overlay (drawn above everything in the pause layer)
++        if menuConfirmRestart then
++            local cw, ch = 200, 80
++            local cx = boxCX - math.floor(cw / 2)
++            local cy = boxY + math.floor((boxH - ch) / 2)
++            -- Shadow
++            if VFXConfig.enabled and VFXConfig.dialogShadow.enabled and not reduceFlashing then
++                local ds = VFXConfig.dialogShadow
++                gfx.setDitherPattern(ds.density, VFXConfig.getDitherType(ds.ditherType))
++                gfx.fillRoundRect(cx + ds.offsetX, cy + ds.offsetY, cw, ch, 8)
++                gfx.setColor(gfx.kColorBlack)
++            end
++            gfx.setColor(gfx.kColorWhite)
++            gfx.fillRoundRect(cx, cy, cw, ch, 8)
++            gfx.setColor(gfx.kColorBlack)
++            gfx.setLineWidth(2)
++            gfx.drawRoundRect(cx, cy, cw, ch, 8)
++            gfx.setLineWidth(1)
++            gfx.setFont(fontBold)
++            gfx.drawTextAligned("Restart game?", boxCX, cy + 12, kTextAlignment.center)
++            gfx.drawLine(cx + 12, cy + 34, cx + cw - 12, cy + 34)
++            drawButtonHints(boxCX, cy + 44,
++                { {button="A", label="Yes"}, {button="B", label="No"} }, fontSmall)
++        end
++
+         if not menuJustOpened and not AnimManager.isTransitioning() then
+-            if drawerY < DRAWER_CLOSED_Y then
++            if menuConfirmRestart then
++                if playdate.buttonJustPressed(playdate.kButtonA) then
++                    SoundManager.play("button")
++                    menuConfirmRestart = false
++                    AnimManager.startTileWipe(function() startNewGame() end)
++                elseif playdate.buttonJustPressed(playdate.kButtonB) then
++                    SoundManager.play("button")
++                    menuConfirmRestart = false
++                end
++            elseif drawerY < DRAWER_CLOSED_Y then
+                 -- Drawer is open: B closes it
+                 if playdate.buttonJustPressed(playdate.kButtonB) then
+                     drawerRetracting = true
+@@ -2612,7 +2669,7 @@ function playdate.update()
+                         resumeTimer()
+                         scene = SCENE_PLAY
+                     elseif menuSelector == 2 then
+-                        AnimManager.startTileWipe(function() startNewGame() end)
++                        menuConfirmRestart = true
+                     else
+                         menuDebugOpen = true
+                         menuDebugSel  = 1
+@@ -2643,6 +2700,18 @@ function playdate.update()
+         crankAccumulator = crankAccumulator + math.abs(crankChange)
+         local pct = math.min(crankAccumulator / GAMEOVER_CRANK, 1.0)
+ 
++        -- Ratchet tick while cranking to restart
++        if math.abs(crankChange) > 0.5 then
++            crankRatchetAccum = crankRatchetAccum + math.abs(crankChange)
++            local tickInterval = math.max(8, 30 - math.abs(crankChange) * 1.5)
++            if crankRatchetAccum >= tickInterval then
++                crankRatchetAccum = crankRatchetAccum % tickInterval
++                SoundManager.playCrankTick()
++            end
++        else
++            crankRatchetAccum = 0
++        end
++
+         -- Board slides upward off screen; fresh board slides in from below
+         local boardH = GRID_SIZE * (TILE_SIZE + MARGIN)
+         local slideOff = pct * (BOARD_Y + boardH + 20)  -- old board slides up
+@@ -2743,15 +2812,21 @@ function playdate.update()
+ 
+         -- Stats (appear after reveal)
+         if gameOverRevealTimer > #mainText * 2 + 4 then
+-            -- SCORE
++            -- LEVEL (left) | SCORE (right) — two-column first row
++            local leftCX  = boxX + math.floor(boxW / 4)       -- 140
++            local rightCX = boxX + math.floor(3 * boxW / 4)   -- 260
+             gfx.setFont(fontSmall)
+-            gfx.drawTextAligned("SCORE", boxCX, sep1Y + 10, kTextAlignment.center)
++            gfx.drawTextAligned("LEVEL", leftCX,  sep1Y + 10, kTextAlignment.center)
++            gfx.drawTextAligned("SCORE", rightCX, sep1Y + 10, kTextAlignment.center)
+             gfx.setFont(fontBold)
+-            gfx.drawTextAligned(tostring(engine.state.score), boxCX, sep1Y + 24, kTextAlignment.center)
++            gfx.drawTextAligned(tostring(engine.state.level), leftCX,  sep1Y + 24, kTextAlignment.center)
++            gfx.drawTextAligned(tostring(engine.state.score), rightCX, sep1Y + 24, kTextAlignment.center)
++            -- vertical divider between columns
++            gfx.setLineWidth(1)
++            gfx.drawLine(boxCX, sep1Y + 6, boxCX, sep1Y + 40)
+ 
+             -- Separator 2
+-            local sep2Y = sep1Y + 50
+-            gfx.setLineWidth(1)
++            local sep2Y = sep1Y + 46
+             gfx.drawLine(boxX + 16, sep2Y, boxX + boxW - 16, sep2Y)
+ 
+             -- EFFICIENCY
+@@ -3063,542 +3138,6 @@ function playdate.update()
+         end
+         AnimManager.drawTileWipe()
+ 
+-    -----------------------------------------
+-    -- CHALLENGE SELECTION SCREEN
+-    -----------------------------------------
+-    elseif scene == SCENE_CHALLENGE_SELECT then
+-        local types = Challenges.getTypes()
+-        local cState = Challenges.getState()
+-
+-        -- Background
+-        if not reduceFlashing then
+-            gfx.setDitherPattern(0.1, gfx.image.kDitherTypeDiagonalLine)
+-            gfx.fillRect(0, 0, 400, 240)
+-            gfx.setColor(gfx.kColorBlack)
+-        end
+-
+-        -- Dialog
+-        if VFXConfig.enabled and VFXConfig.dialogShadow.enabled and not reduceFlashing then
+-            local ds = VFXConfig.dialogShadow
+-            gfx.setDitherPattern(ds.density, VFXConfig.getDitherType(ds.ditherType))
+-            gfx.fillRoundRect(40 + ds.offsetX, 10 + ds.offsetY, 320, 220, ds.cornerRadius)
+-            gfx.setColor(gfx.kColorBlack)
+-        end
+-        gfx.setColor(gfx.kColorWhite)
+-        gfx.fillRoundRect(40, 10, 320, 220, 8)
+-        gfx.setColor(gfx.kColorBlack)
+-        gfx.drawRoundRect(40, 10, 320, 220, 8)
+-
+-        gfx.setFont(fontBold)
+-        gfx.drawTextAligned("CHALLENGES", 200, 22, kTextAlignment.center)
+-        gfx.drawLine(60, 38, 340, 38)
+-
+-        gfx.setFont(fontRegular)
+-        local itemHeight = 34
+-        local startY = 50
+-        for i, ct in ipairs(types) do
+-            local y = startY + (i - 1) * itemHeight
+-            if i == challengeSelectIndex then
+-                -- Highlight selected
+-                gfx.fillRect(50, y - 2, 300, 28)
+-                gfx.setColor(gfx.kColorWhite)
+-            end
+-
+-            local pBest = cState.personalBests[ct.id]
+-            local bestStr = pBest and ("  Best: " .. Challenges.formatResult(pBest, ct)) or ""
+-            gfx.drawTextAligned(ct.name .. bestStr, 200, y, kTextAlignment.center)
+-
+-            if i == challengeSelectIndex then
+-                gfx.setColor(gfx.kColorBlack)
+-            end
+-        end
+-
+-        gfx.setFont(fontSmall)
+-        gfx.drawTextAligned("↑/↓: Select    A: Start    B: Back", 200, 210, kTextAlignment.center)
+-
+-        -- Input
+-        if playdate.buttonJustPressed(playdate.kButtonUp) then
+-            SoundManager.play("button")
+-            challengeSelectIndex = challengeSelectIndex - 1
+-            if challengeSelectIndex < 1 then challengeSelectIndex = #types end
+-        elseif playdate.buttonJustPressed(playdate.kButtonDown) then
+-            SoundManager.play("button")
+-            challengeSelectIndex = challengeSelectIndex + 1
+-            if challengeSelectIndex > #types then challengeSelectIndex = 1 end
+-        elseif playdate.buttonJustPressed(playdate.kButtonA) then
+-            SoundManager.play("button")
+-            currentChallenge = types[challengeSelectIndex]
+-            scene = SCENE_CHALLENGE_INTRO
+-        elseif playdate.buttonJustPressed(playdate.kButtonB) then
+-            SoundManager.play("button")
+-            scene = SCENE_TITLE
+-        end
+-
+-    -----------------------------------------
+-    -- CHALLENGE INTRO
+-    -----------------------------------------
+-    elseif scene == SCENE_CHALLENGE_INTRO then
+-        local ct = currentChallenge
+-        local cState = Challenges.getState()
+-
+-        -- Background
+-        if not reduceFlashing then
+-            gfx.setDitherPattern(0.1, gfx.image.kDitherTypeDiagonalLine)
+-            gfx.fillRect(0, 0, 400, 240)
+-            gfx.setColor(gfx.kColorBlack)
+-        end
+-
+-        -- Dialog
+-        if VFXConfig.enabled and VFXConfig.dialogShadow.enabled and not reduceFlashing then
+-            local ds = VFXConfig.dialogShadow
+-            gfx.setDitherPattern(ds.density, VFXConfig.getDitherType(ds.ditherType))
+-            gfx.fillRoundRect(50 + ds.offsetX, 20 + ds.offsetY, 300, 200, ds.cornerRadius)
+-            gfx.setColor(gfx.kColorBlack)
+-        end
+-        gfx.setColor(gfx.kColorWhite)
+-        gfx.fillRoundRect(50, 20, 300, 200, 8)
+-        gfx.setColor(gfx.kColorBlack)
+-        gfx.drawRoundRect(50, 20, 300, 200, 8)
+-
+-        gfx.setFont(fontBold)
+-        gfx.drawTextAligned("CHALLENGE", 200, 32, kTextAlignment.center)
+-        gfx.drawLine(70, 52, 330, 52)
+-
+-        gfx.setFont(fontRegular)
+-        gfx.drawTextAligned("*" .. ct.name .. "*", 200, 62, kTextAlignment.center)
+-        gfx.setFont(fontSmall)
+-        gfx.drawTextAligned(ct.desc, 200, 84, kTextAlignment.center)
+-        gfx.drawTextAligned("Metric: *" .. ct.metricLabel .. "* (lower is better)", 200, 104, kTextAlignment.center)
+-
+-        -- Constraints
+-        if ct.noShuffle then
+-            gfx.drawTextAligned("Shuffles DISABLED", 200, 124, kTextAlignment.center)
+-        elseif ct.mustUseAllShuffles then
+-            gfx.drawTextAligned("Must use ALL 8 shuffles to win", 200, 124, kTextAlignment.center)
+-        end
+-
+-        -- Personal best
+-        gfx.drawLine(70, 142, 330, 142)
+-        local pBest = cState.personalBests[ct.id]
+-        if pBest then
+-            gfx.drawTextAligned("Personal best: *" .. Challenges.formatResult(pBest, ct) .. "*", 200, 158, kTextAlignment.center)
+-        else
+-            gfx.drawTextAligned("No score yet — give it a try!", 200, 158, kTextAlignment.center)
+-        end
+-
+-        drawButtonHints(200, 196,
+-            { {button="A", label="Start"}, {button="B", label="Back"} }, fontRegular)
+-
+-        if playdate.buttonJustPressed(playdate.kButtonA) then
+-            SoundManager.play("button")
+-            AnimManager.startIris(function()
+-                startChallengeAttempt(currentChallenge)
+-            end)
+-        elseif playdate.buttonJustPressed(playdate.kButtonB) then
+-            SoundManager.play("button")
+-            scene = SCENE_CHALLENGE_SELECT
+-        end
+-
+-        AnimManager.update()
+-        AnimManager.drawIris()
+-
+-    -----------------------------------------
+-    -- CHALLENGE GAMEPLAY
+-    -----------------------------------------
+-    elseif scene == SCENE_CHALLENGE_PLAY then
+-        local ct = currentChallenge
+-        local s = dailyEngine.state
+-        local wasShuffling = AnimManager.isShuffling()
+-        AnimManager.update()
+-        -- Shuffle SFX: tone on each flip, final sting on completion
+-        local flipVal = AnimManager.getShuffleFlipVal()
+-        if flipVal ~= nil then
+-            SoundManager.playReroll(flipVal)
+-        elseif wasShuffling and not AnimManager.isShuffling() and pendingShuffleNewVal ~= nil then
+-            SoundManager.playReroll(pendingShuffleNewVal)
+-        end
+-
+-        -- D-pad input
+-        local result = nil
+-        local swipeDX, swipeDY = 0, 0
+-        if not AnimManager.isSliding() and not AnimManager.isTransitioning() then
+-            if playdate.buttonJustPressed(playdate.kButtonUp) then
+-                swipeDX, swipeDY = 0, -1; result = dailyEngine:swipe(0, -1)
+-            elseif playdate.buttonJustPressed(playdate.kButtonDown) then
+-                swipeDX, swipeDY = 0, 1; result = dailyEngine:swipe(0, 1)
+-            elseif playdate.buttonJustPressed(playdate.kButtonLeft) then
+-                swipeDX, swipeDY = -1, 0; result = dailyEngine:swipe(-1, 0)
+-            elseif playdate.buttonJustPressed(playdate.kButtonRight) then
+-                swipeDX, swipeDY = 1, 0; result = dailyEngine:swipe(1, 0)
+-            end
+-        end
+-
+-        if result then
+-            if result.moved then
+-                dailyMoveCount = dailyMoveCount + 1
+-                for _, anim in ipairs(result.anims) do
+-                    if anim.type == "slide" then
+-                        AnimManager.addSlide(anim.fromR, anim.fromC, anim.toR, anim.toC)
+-                    elseif anim.type == "spawn" then
+-                        AnimManager.addSpawnPop(anim.r, anim.c)
+-                    elseif anim.type == "neutralize" then
+-                        AnimManager.addFlash(anim.r, anim.c)
+-                        AnimManager.addNeutralPop(anim.r, anim.c)
+-                        local npx = BOARD_X + (anim.c - 1) * (TILE_SIZE + MARGIN) + (MARGIN / 2) + TILE_SIZE / 2
+-                        local npy = BOARD_Y + (anim.r - 1) * (TILE_SIZE + MARGIN) + (MARGIN / 2) + TILE_SIZE / 2
+-                        AnimManager.addParticles(npx, npy)
+-                    elseif anim.type == "merge" then
+-                        AnimManager.addFlash(anim.r, anim.c)
+-                        AnimManager.addNeutralPop(anim.r, anim.c)
+-                        local mpx = BOARD_X + (anim.c - 1) * (TILE_SIZE + MARGIN) + (MARGIN / 2) + TILE_SIZE / 2
+-                        local mpy = BOARD_Y + (anim.r - 1) * (TILE_SIZE + MARGIN) + (MARGIN / 2) + TILE_SIZE / 2
+-                        AnimManager.addParticles(mpx, mpy)
+-                    end
+-                end
+-                if result.neutralized > 0 then
+-                    SoundManager.play("neutralize")
+-                elseif result.merged > 0 then
+-                    SoundManager.play("mergePartial")
+-                else
+-                    SoundManager.play("move")
+-                end
+-            else
+-                SoundManager.play("shake")
+-                AnimManager.addWiggle(GRID_SIZE)
+-            end
+-        end
+-
+-        -- Crank shuffle (respecting daily constraints)
+-        local shuffleAllowed = not ct.noShuffle
+-        if shuffleAllowed and not s.isGameOver and not s.isSpecialSequenceActive then
+-            if not AnimManager.isShuffling() and not AnimManager.isShuffleCooldown() then
+-                if not playdate.isCrankDocked() then
+-                    local crankChange = playdate.getCrankChange()
+-                    if crankChange > 3 then
+-                        if shuffleAccumulator == 0 then
+-                            -- Pick the charge tile value once at the start
+-                            local ok, v = pcall(function() return engine:chooseRandomTileValue() end)
+-                            if ok and v then chargeDisplayVal = v end
+-                        end
+-                        shuffleAccumulator = shuffleAccumulator + crankChange
+-                    elseif crankChange < -3 then
+-                        -- Reverse crank: snap back
+-                        shuffleAccumulator = 0
+-                        chargeFlipAccum    = 0
+-                    end
+-                    -- Near-zero crank: hold position
+-                    if shuffleAccumulator >= SHUFFLE_THRESHOLD and s.currentRerolls > 0 then
+-                        s.currentRerolls = s.currentRerolls - 1
+-                        local oldVal = s.nextTileValue
+-                        local ok, newVal = pcall(function() return dailyEngine:chooseRandomTileValue(-oldVal) end)
+-                        if ok and newVal ~= nil then
+-                            pendingShuffleNewVal = newVal
+-                        else
+-                            pendingShuffleNewVal = oldVal
+-                        end
+-                        AnimManager.startShuffle(oldVal, pendingShuffleNewVal, dailyEngine)
+-                        shuffleAccumulator = 0
+-                        chargeFlipAccum    = 0
+-                    end
+-                    if s.currentRerolls == 0 then shuffleAccumulator = 0; chargeFlipAccum = 0 end
+-                end
+-            else
+-                playdate.getCrankChange()
+-                shuffleAccumulator = 0
+-            end
+-        else
+-            playdate.getCrankChange()  -- drain crank when shuffles disabled
+-            shuffleAccumulator = 0
+-        end
+-
+-        -- Apply pending shuffle
+-        if pendingShuffleNewVal and not AnimManager.isShuffling() then
+-            s.nextTileValue = pendingShuffleNewVal
+-            pendingShuffleNewVal = nil
+-        end
+-
+-        -- Check for game over in daily
+-        if s.isGameOver and not AnimManager.isTransitioning() then
+-            SoundManager.stopBGM()
+-            AnimManager.startIris(function()
+-                dailyResult = { value = nil, isNewBest = false, challengeType = ct, failed = true }
+-                scene = SCENE_CHALLENGE_RESULT
+-            end)
+-        end
+-
+-        -- Check for level clear in daily
+-        if s.isSpecialSequenceActive and not AnimManager.isTransitioning() then
+-            local levelJustBeaten = s.level
+-            if ct.level == 1 or (ct.id == "marathon" and levelJustBeaten >= 4) then
+-                -- Challenge complete!
+-                local elapsed = playdate.getSecondsSinceEpoch() - dailyStartTime
+-                local resultValue
+-                if ct.metric == "moves" then
+-                    resultValue = dailyMoveCount
+-                else
+-                    resultValue = elapsed
+-                end
+-
+-                -- Entropy constraint: must have used all 8 shuffles
+-                if ct.mustUseAllShuffles and s.currentRerolls > 0 then
+-                    -- Didn't use all shuffles — doesn't count, keep playing
+-                    -- (they cleared the board but haven't met the constraint)
+-                    -- Actually for level clear we need to let them know
+-                    SoundManager.stopBGM()
+-                    AnimManager.startIris(function()
+-                        dailyResult = {
+-                            value = nil, isNewBest = false, challengeType = ct,
+-                            failed = true, failReason = "Used only " .. (8 - s.currentRerolls) .. "/8 shuffles"
+-                        }
+-                        scene = SCENE_CHALLENGE_RESULT
+-                    end)
+-                else
+-                    local isNew = Challenges.isNewBest(ct.id, resultValue)
+-                    Challenges.recordAttempt(ct.id, resultValue)
+-                    SoundManager.stopBGM()
+-                    SoundManager.play("neutralize")
+-                    AnimManager.startIris(function()
+-                        dailyResult = { value = resultValue, isNewBest = isNew, challengeType = ct, failed = false }
+-                        scene = SCENE_CHALLENGE_RESULT
+-                        AnimManager.addConfetti()
+-                    end)
+-                end
+-            elseif ct.id == "marathon" and levelJustBeaten < 4 then
+-                -- Marathon: advance to next level, keep going
+-                AnimManager.startIris(function()
+-                    dailyEngine:advanceLevel()
+-                    AnimManager.addTileIntro(GRID_SIZE)
+-                end)
+-            end
+-        end
+-
+-        -- RENDER BOARD (daily uses same board rendering as normal play)
+-        local shakeX, shakeY = AnimManager.getShakeOffset()
+-        gfx.setLineWidth(2)
+-
+-        -- VFX: sidebar backgrounds
+-        if VFXConfig.enabled and VFXConfig.sidebarBg.enabled and not reduceFlashing then
+-            gfx.setDitherPattern(VFXConfig.sidebarBg.density, VFXConfig.getDitherType(VFXConfig.sidebarBg.ditherType))
+-            gfx.fillRect(0, 0, BOARD_X, 240)
+-            gfx.fillRect(BOARD_X + GRID_SIZE * (TILE_SIZE + MARGIN), 0, 80, 240)
+-            gfx.setColor(gfx.kColorBlack)
+-        end
+-
+-        -- VFX: board frame
+-        if VFXConfig.enabled and VFXConfig.boardFrame.enabled and not reduceFlashing then
+-            local bf = VFXConfig.boardFrame
+-            local boardW = GRID_SIZE * (TILE_SIZE + MARGIN)
+-            local boardH = boardW
+-            local fx = BOARD_X - bf.padding - bf.width
+-            local fy = BOARD_Y - bf.padding - bf.width
+-            local fw = boardW + (bf.padding + bf.width) * 2
+-            local fh = boardH + (bf.padding + bf.width) * 2
+-            gfx.setDitherPattern(bf.density, VFXConfig.getDitherType(bf.ditherType))
+-            for w = 0, bf.width - 1 do
+-                gfx.drawRect(fx + w, fy + w, fw - w * 2, fh - w * 2)
+-            end
+-            if bf.innerShadow then
+-                gfx.setDitherPattern(bf.innerDensity, VFXConfig.getDitherType(bf.ditherType))
+-                gfx.drawRect(BOARD_X - 1, BOARD_Y - 1, boardW + 2, boardH + 2)
+-            end
+-            gfx.setColor(gfx.kColorBlack)
+-        end
+-
+-        for r = 1, GRID_SIZE do
+-            for c = 1, GRID_SIZE do
+-                local basePx = BOARD_X + (c - 1) * (TILE_SIZE + MARGIN) + (MARGIN / 2)
+-                local basePy = BOARD_Y + (r - 1) * (TILE_SIZE + MARGIN) + (MARGIN / 2)
+-                local px = basePx + shakeX
+-                local py = basePy + shakeY
+-                local slideOx, slideOy = AnimManager.getSlideOffset(r, c, TILE_SIZE, MARGIN)
+-                px = px + slideOx
+-                py = py + slideOy
+-                local wigOx, wigOy = AnimManager.getWiggleOffset(r, c)
+-                px = px + wigOx
+-                py = py + wigOy
+-
+-                local sweepScale = AnimManager.getClearSweepScale(r, c)
+-                local introScale = (sweepScale == nil) and AnimManager.getIntroScale(r, c) or nil
+-                local neutralPopScale = (sweepScale == nil and introScale == nil) and AnimManager.getNeutralPopScale(r, c) or nil
+-                local popScale = (sweepScale == nil and introScale == nil and neutralPopScale == nil) and AnimManager.getSpawnPopScale(r, c) or nil
+-                local activeScale = sweepScale or introScale or neutralPopScale or popScale
+-                local drawSize = TILE_SIZE
+-                if activeScale ~= nil then
+-                    if activeScale <= 0 then goto skipDailyTile end
+-                    local clamped = math.max(0.01, math.min(activeScale, 1.35))
+-                    drawSize = math.floor(TILE_SIZE * clamped)
+-                    px = basePx + shakeX + slideOx + wigOx + (TILE_SIZE - drawSize) / 2
+-                    py = basePy + shakeY + slideOy + wigOy + (TILE_SIZE - drawSize) / 2
+-                end
+-
+-                gfx.setColor(gfx.kColorBlack)
+-                gfx.drawRoundRect(px, py, drawSize, drawSize, TILE_RADIUS)
+-                local v = s.grid[r][c]
+-                if v ~= nil then
+-                    local flashing = AnimManager.isFlashing(r, c)
+-                    drawTile(v, px, py, drawSize, flashing)
+-                end
+-                ::skipDailyTile::
+-            end
+-        end
+-
+-        AnimManager.drawParticles()
+-        AnimManager.drawRipples()
+-
+-        -- LEFT UI: Daily-specific info
+-        gfx.setColor(gfx.kColorBlack)
+-        gfx.setFont(fontSmall)
+-
+-        -- VFX: pulsing DAILY indicator
+-        local dailyLabelY = 8
+-        if VFXConfig.enabled and VFXConfig.dailyBanner.pulseIndicator.enabled then
+-            local pulse = 0.7 + 0.3 * math.abs(math.sin(vfxFrame * VFXConfig.dailyBanner.pulseIndicator.speed * 0.05))
+-            if pulse > 0.85 then
+-                gfx.drawTextAligned("*DAILY*", 40, dailyLabelY, kTextAlignment.center)
+-            else
+-                gfx.drawTextAligned("DAILY", 40, dailyLabelY, kTextAlignment.center)
+-            end
+-        else
+-            gfx.drawTextAligned("*DAILY*", 40, dailyLabelY, kTextAlignment.center)
+-        end
+-
+-        gfx.setFont(fontSmall)
+-        gfx.drawTextAligned(ct.name, 40, 24, kTextAlignment.center)
+-
+-        -- Timer
+-        local elapsed = playdate.getSecondsSinceEpoch() - dailyStartTime
+-        gfx.setFont(fontSmall)
+-        gfx.drawTextAligned("TIME", 40, 50, kTextAlignment.center)
+-        gfx.setFont(fontBold)
+-        gfx.drawTextAligned(formatTime(elapsed), 40, 64, kTextAlignment.center)
+-
+-        -- Moves
+-        gfx.setFont(fontSmall)
+-        gfx.drawTextAligned("MOVES", 40, 88, kTextAlignment.center)
+-        gfx.setFont(fontBold)
+-        gfx.drawTextAligned("" .. dailyMoveCount, 40, 102, kTextAlignment.center)
+-
+-        -- Score
+-        gfx.setFont(fontSmall)
+-        gfx.drawTextAligned("SCORE", 40, 126, kTextAlignment.center)
+-        gfx.setFont(fontBold)
+-        gfx.drawTextAligned("" .. s.score, 40, 140, kTextAlignment.center)
+-
+-        -- Shuffles remaining
+-        gfx.setFont(fontSmall)
+-        if ct.noShuffle then
+-            gfx.drawTextAligned("NO", 40, 170, kTextAlignment.center)
+-            gfx.drawTextAligned("SHUFFLE", 40, 184, kTextAlignment.center)
+-        else
+-            gfx.drawTextAligned("SHUFFLES", 40, 170, kTextAlignment.center)
+-            gfx.setFont(fontBold)
+-            gfx.drawTextAligned("" .. s.currentRerolls .. "/8", 40, 184, kTextAlignment.center)
+-        end
+-
+-        gfx.setFont(fontRegular)
+-
+-        -- RIGHT UI: Next tile preview
+-        gfx.setFont(fontSmall)
+-        gfx.drawTextAligned("NEXT", 360, 20, kTextAlignment.center)
+-        gfx.setFont(fontRegular)
+-
+-        local previewSize = TILE_SIZE
+-        local preview_x = 360 - previewSize / 2
+-        local preview_y = 46
+-        gfx.setColor(gfx.kColorBlack)
+-        gfx.drawRoundRect(preview_x, preview_y, previewSize, previewSize, TILE_RADIUS)
+-        local shuffleDisplayVal = AnimManager.getShuffleDisplayVal()
+-        local nv = shuffleDisplayVal or s.nextTileValue or 1
+-        drawTile(nv, preview_x, preview_y, previewSize)
+-
+-        -- Shuffle icon (if shuffles allowed)
+-        if not ct.noShuffle then
+-            local iconCX, iconCY = 360, 114
+-            local fillPct = 0
+-            if not AnimManager.isShuffling() and s.currentRerolls > 0 then
+-                fillPct = math.min(math.abs(shuffleAccumulator) / SHUFFLE_THRESHOLD, 1.0)
+-            end
+-            AnimManager.drawShuffleIcon(iconCX, iconCY, fillPct, s.currentRerolls, playdate.getCrankPosition())
+-        end
+-
+-        -- Crank indicator
+-        if not ct.noShuffle and playdate.isCrankDocked() and s.currentRerolls > 0 then
+-            playdate.ui.crankIndicator:update()
+-        end
+-
+-        AnimManager.drawConfetti()
+-        AnimManager.drawIris()
+-
+-    -----------------------------------------
+-    -- DAILY CHALLENGE RESULT
+-    -----------------------------------------
+-    elseif scene == SCENE_CHALLENGE_RESULT then
+-        AnimManager.update()
+-        AnimManager.drawConfetti()
+-
+-        -- Dialog background
+-        if VFXConfig.enabled and VFXConfig.dialogShadow.enabled and not reduceFlashing then
+-            local ds = VFXConfig.dialogShadow
+-            gfx.setDitherPattern(ds.density, VFXConfig.getDitherType(ds.ditherType))
+-            gfx.fillRoundRect(50 + ds.offsetX, 30 + ds.offsetY, 300, 180, ds.cornerRadius)
+-            gfx.setColor(gfx.kColorBlack)
+-        end
+-        gfx.setColor(gfx.kColorWhite)
+-        gfx.fillRoundRect(50, 30, 300, 180, 8)
+-        gfx.setColor(gfx.kColorBlack)
+-        gfx.drawRoundRect(50, 30, 300, 180, 8)
+-
+-        if dailyResult and dailyResult.failed then
+-            gfx.setFont(fontBold)
+-            gfx.drawTextAligned("CHALLENGE FAILED", 200, 44, kTextAlignment.center)
+-            gfx.setFont(fontSmall)
+-            if dailyResult.failReason then
+-                gfx.drawTextAligned(dailyResult.failReason, 200, 72, kTextAlignment.center)
+-            else
+-                gfx.drawTextAligned("Game over — board filled up!", 200, 72, kTextAlignment.center)
+-            end
+-            gfx.drawTextAligned("Don't worry, you can try again.", 200, 92, kTextAlignment.center)
+-        elseif dailyResult then
+-            gfx.setFont(fontBold)
+-            if dailyResult.isNewBest then
+-                gfx.drawTextAligned("NEW BEST!", 200, 44, kTextAlignment.center)
+-            else
+-                gfx.drawTextAligned("CHALLENGE COMPLETE", 200, 44, kTextAlignment.center)
+-            end
+-
+-            gfx.drawLine(70, 64, 330, 64)
+-            gfx.setFont(fontRegular)
+-            gfx.drawTextAligned(dailyResult.challengeType.name, 200, 72, kTextAlignment.center)
+-            gfx.setFont(fontBold)
+-            gfx.drawTextAligned(Challenges.formatResult(dailyResult.value, dailyResult.challengeType), 200, 92, kTextAlignment.center)
+-
+-            -- Personal best
+-            local cState = Challenges.getState()
+-            local pBest = cState.personalBests[dailyResult.challengeType.id]
+-            if pBest then
+-                gfx.setFont(fontSmall)
+-                gfx.drawTextAligned("Personal best: " .. Challenges.formatResult(pBest, dailyResult.challengeType), 200, 118, kTextAlignment.center)
+-            end
+-        end
+-
+-        drawButtonHints(200, 186,
+-            { {button="A", label="Retry"}, {button="B", label="Title"} }, fontRegular)
+-
+-        if playdate.buttonJustPressed(playdate.kButtonA) then
+-            SoundManager.play("button")
+-            AnimManager.startIris(function()
+-                startChallengeAttempt(currentChallenge)
+-            end)
+-        elseif playdate.buttonJustPressed(playdate.kButtonB) then
+-            SoundManager.play("button")
+-            AnimManager.startIris(function()
+-                scene = SCENE_TITLE
+-                splashInitialized = false
+-                splashPromptImage = nil
+-            end)
+-        end
+-
+-        AnimManager.drawIris()
+     end
+ 
+     -- ── Achievement toast (drawn on top of everything, all scenes) ──
+
+commit 2b36b12f21497cf2dea0b0fd06deb90675dcc737
+Author: Aaron Price <aaronmorrisprice@gmail.com>
+Date:   Tue Apr 7 18:24:30 2026 -0400
+
+    Add efficiencyHistory tracking and fix efficiency capture
+    
+    - storage.js: add v15→v16 migration for efficiencyHistory, addEfficiencyToHistory() method, wire into getAllStats() and resetAllStats()
+    - game.js: remove redundant updateBestEfficiency() calls from engine internals (already handled in main.js)
+    - main.lua: fix missing gameOverEfficiency capture before stats update block
+    
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+diff --git a/Playdate_Port/source/main.lua b/Playdate_Port/source/main.lua
+index 8dce137..dedf358 100644
+--- a/Playdate_Port/source/main.lua
++++ b/Playdate_Port/source/main.lua
+@@ -1812,6 +1812,7 @@ function playdate.update()
+                 stats.bestEfficiency = eff
+                 isNewBestEfficiency = true
+             end
++            gameOverEfficiency = eff
+             -- Update stats
+             stats.totalMoves = stats.totalMoves + s.moveCounter
+             stats.totalNeutralized = stats.totalNeutralized + s.sessionNeutralized
+
+commit fee154cde4c2398777c6bca8548bf4cb8e9957e8
+Author: Aaron Price <aaronmorrisprice@gmail.com>
+Date:   Mon Apr 6 16:46:29 2026 -0400
+
+    Add shuffle reminder popup and fix stretched tooltip tiles
+    
+    Playdate: track consecutive games without shuffle usage; show a "Don't
+    forget to shuffle!" dialog at the start of the 3rd such game. Mirrors
+    tutorial panel 5 content. Blocks game input while visible, dismissed
+    with A or B.
+    
+    Web: fix .tooltip-tile stretching — changed min-width to width so the
+    ++ tile no longer expands to fit two SVGs side-by-side.
+    
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+diff --git a/Playdate_Port/source/main.lua b/Playdate_Port/source/main.lua
+index 662821c..8dce137 100644
+--- a/Playdate_Port/source/main.lua
++++ b/Playdate_Port/source/main.lua
+@@ -76,6 +76,7 @@ local pauseSnapshot = nil  -- frozen board captured the moment we paused
+ local pauseFadeTimer = 0   -- frames since pause opened, for fade-in
+ local introTimer = 0
+ local levelClearScale = 0  -- 0→1 pop-in animation for level clear dialog
++local shuffleReminderVisible = false  -- true = show shuffle tip popup over new game
+ 
+ --------------------------------------------------------------
+ -- PERSISTENT STATS (playdate.datastore)
+@@ -85,6 +86,7 @@ local stats = {
+     bestEfficiency = 0,
+     highestLevel = 1,
+     gamesPlayed = 0,
++    gamesWithoutShuffle = 0,
+     totalNeutralized = 0,
+     totalMerges = 0,
+     totalMoves = 0,
+@@ -401,6 +403,13 @@ local function startNewGame()
+     AnimManager.addTileIntro(GRID_SIZE)
+     SoundManager.play("restart")
+     scene = SCENE_PLAY
++    -- Show shuffle reminder if player hasn't cranked in 2+ consecutive games
++    shuffleReminderVisible = false
++    if stats.tutorialSeen and (stats.gamesWithoutShuffle or 0) >= 2 then
++        shuffleReminderVisible = true
++        stats.gamesWithoutShuffle = 0
++        saveStats()
++    end
+     SoundManager.playBGM()
+ end
+ 
+@@ -1591,7 +1600,7 @@ function playdate.update()
+             -- D-pad input (blocked during slide animations)
+             local result = nil
+             local swipeDX, swipeDY = 0, 0
+-            if not AnimManager.isSliding() and not AnimManager.isTransitioning() then
++            if not AnimManager.isSliding() and not AnimManager.isTransitioning() and not shuffleReminderVisible then
+                 if playdate.buttonJustPressed(playdate.kButtonUp) then
+                 swipeDX, swipeDY = 0, -1; result = engine:swipe(0, -1)
+             elseif playdate.buttonJustPressed(playdate.kButtonDown) then
+@@ -1715,11 +1724,11 @@ function playdate.update()
+         --     loadLastInitials(); initialsCursor=1; initialsBlink=0; initialsPhase=true
+         --     SoundManager.play("button")
+         -- elseif drawerY < DRAWER_CLOSED_Y and playdate.buttonJustPressed(playdate.kButtonB) then
+-        if drawerY < DRAWER_CLOSED_Y and playdate.buttonJustPressed(playdate.kButtonB) then
++        if not shuffleReminderVisible and drawerY < DRAWER_CLOSED_Y and playdate.buttonJustPressed(playdate.kButtonB) then
+             drawerRetracting = true
+             SoundManager.play("button")
+         -- Menu invocation
+-        elseif not s.isGameOver and not s.isSpecialSequenceActive and not AnimManager.isTransitioning() and playdate.buttonJustPressed(playdate.kButtonA) then
++        elseif not shuffleReminderVisible and not s.isGameOver and not s.isSpecialSequenceActive and not AnimManager.isTransitioning() and playdate.buttonJustPressed(playdate.kButtonA) then
+             SoundManager.play("button")
+             pauseTimer()
+             pauseSnapshot = playdate.graphics.getDisplayImage()  -- freeze the board
+@@ -1738,7 +1747,7 @@ function playdate.update()
+         end
+ 
+         -- Crank shuffle logic
+-        if not s.isGameOver and not s.isSpecialSequenceActive then
++        if not shuffleReminderVisible and not s.isGameOver and not s.isSpecialSequenceActive then
+             -- Poll: if shuffle animation just completed, apply the new value
+             if pendingShuffleNewVal and not AnimManager.isShuffling() then
+                 s.nextTileValue = pendingShuffleNewVal
+@@ -1811,6 +1820,11 @@ function playdate.update()
+             if s.score > stats.highScore then stats.highScore = s.score end
+             if s.level > stats.highestLevel then stats.highestLevel = s.level end
+             stats.gamesPlayed = stats.gamesPlayed + 1
++            if (8 - s.currentRerolls) == 0 then
++                stats.gamesWithoutShuffle = (stats.gamesWithoutShuffle or 0) + 1
++            else
++                stats.gamesWithoutShuffle = 0
++            end
+             if not stats.scoreHistory then stats.scoreHistory = {} end
+             table.insert(stats.scoreHistory, s.score)
+             while #stats.scoreHistory > 100 do table.remove(stats.scoreHistory, 1) end
+@@ -2282,6 +2296,48 @@ function playdate.update()
+         AnimManager.drawTileWipe()
+         AnimManager.drawIris()
+ 
++        -- Shuffle reminder popup (shown when player hasn't shuffled in 2+ games)
++        if shuffleReminderVisible then
++            local bw, bh = 300, 128
++            local bx = 200 - math.floor(bw / 2)
++            local by = 120 - math.floor(bh / 2)
++            local br = 8
++
++            -- Dithered shadow
++            if VFXConfig.enabled and VFXConfig.dialogShadow.enabled then
++                local ds = VFXConfig.dialogShadow
++                gfx.setDitherPattern(ds.density, VFXConfig.getDitherType(ds.ditherType))
++                gfx.fillRoundRect(bx + ds.offsetX, by + ds.offsetY, bw, bh, br)
++                gfx.setColor(gfx.kColorBlack)
++            end
++
++            -- Box
++            gfx.setColor(gfx.kColorWhite)
++            gfx.fillRoundRect(bx, by, bw, bh, br)
++            gfx.setColor(gfx.kColorBlack)
++            gfx.drawRoundRect(bx, by, bw, bh, br)
++
++            -- Content (mirrors tutorial panel 5)
++            gfx.drawTextAligned("*Don't forget to shuffle!*", 200, by + 14, kTextAlignment.center)
++            gfx.setLineWidth(1)
++            gfx.drawLine(bx + 12, by + 34, bx + bw - 12, by + 34)
++            gfx.setLineWidth(2)
++            gfx.drawTextAligned("*Crank* to shuffle your next tile.", 200, by + 44, kTextAlignment.center)
++            gfx.drawTextAligned("You get *8* shuffles per game.", 200, by + 64, kTextAlignment.center)
++            gfx.drawTextAligned("A / B: Got it", 200, by + bh - 20, kTextAlignment.center)
++
++            -- Crank indicator
++            if playdate.isCrankDocked() then
++                playdate.ui.crankIndicator:update()
++            end
++
++            -- Dismiss
++            if playdate.buttonJustPressed(playdate.kButtonA) or playdate.buttonJustPressed(playdate.kButtonB) then
++                SoundManager.play("button")
++                shuffleReminderVisible = false
++            end
++        end
++
+         ::skipBoardRender::
+         end -- end of if scene == SCENE_PLAY
+ 

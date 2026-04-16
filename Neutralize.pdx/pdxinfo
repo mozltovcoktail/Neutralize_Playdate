@@ -1,0 +1,9 @@
+name=Neutralize
+author=Aaron Price
+description=Swipe, Merge, Get Neutral.
+bundleID=com.instantaaron.neutralize
+version=1.0.1
+buildNumber=2
+imagePath=assets/images
+pdxversion=30005
+buildtime=829613484
