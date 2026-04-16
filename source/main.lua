@@ -1126,21 +1126,18 @@ function playdate.update()
             local tw, th = gfx.getTextSize(splashTitleText)
             local strokeW = 4
             local buf = strokeW + 2
-            -- Use full screen width so the image always fits regardless of font metrics
-            local imgW = 400
-            local cx = math.floor(imgW / 2)
-            splashTitleImage = gfx.image.new(imgW, th + buf*2)
+            splashTitleImage = gfx.image.new(tw + buf*2, th + buf*2)
             gfx.pushContext(splashTitleImage)
                 gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
                 for ox = -strokeW, strokeW do
                     for oy = -strokeW, strokeW do
                         if (ox*ox + oy*oy) <= strokeW*strokeW then
-                            gfx.drawTextAligned(splashTitleText, cx + ox, buf + oy, kTextAlignment.center)
+                            gfx.drawText(splashTitleText, buf + ox, buf + oy)
                         end
                     end
                 end
                 gfx.setImageDrawMode(gfx.kDrawModeCopy)
-                gfx.drawTextAligned(splashTitleText, cx, buf, kTextAlignment.center)
+                gfx.drawText(splashTitleText, buf, buf)
             gfx.popContext()
             gfx.setFont(fontRegular)
 
@@ -1277,9 +1274,9 @@ function playdate.update()
         -- Cached Title image with white stroke
         local titleY = 88
         if splashTitleImage then
-            local _, imgH = splashTitleImage:getSize()
-            local buf = 4 + 2
-            splashTitleImage:draw(0, titleY - buf)
+            local imgW, imgH = splashTitleImage:getSize()
+            local buf = 5 + 2
+            splashTitleImage:draw(200 - imgW/2, titleY - buf)
         end
 
         -- Bottom Prompts: slow pulse (~2s cycle, mostly visible with brief fade)
