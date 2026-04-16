@@ -20,7 +20,7 @@ local fontSmall      = _sysFont
 local fontRegular    = _sysFont
 local fontBold       = gfx.getSystemFont(gfx.font.kVariantBold) or _sysFont
 local fontMedium     = _sysFont
-local fontTitle      = gfx.font.new("fonts/Rubik-Bold-48")
+local fontTitle      = gfx.font.new("fonts/Rubik-Medium-64")
 local fontPauseTitle = gfx.font.new("fonts/Rubik-Bold-24")
 local fontPauseItem  = _sysFont
 
@@ -1124,7 +1124,7 @@ function playdate.update()
             local splashTitleText = "NEUTRALIZE"
             gfx.setFont(fontTitle)
             local tw, th = gfx.getTextSize(splashTitleText)
-            local strokeW = 5 -- Derived from math.floor(3 * (60/36))
+            local strokeW = 4
             local buf = strokeW + 2
             splashTitleImage = gfx.image.new(tw + buf*2, th + buf*2)
             gfx.pushContext(splashTitleImage)
