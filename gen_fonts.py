@@ -47,6 +47,8 @@ TARGETS = [
     # Large display: scores, level numbers
     ("Rubik-Medium-24", 500, 24, 0, 110),
     ("Rubik-Bold-24",   700, 24, 0, 160),
+    # Title logo
+    ("Rubik-ExtraBold-56", 800, 56, 1, 180),
 ]
 
 def instantiate_weight(src_ttf_path, weight):
